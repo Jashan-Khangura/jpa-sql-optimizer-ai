@@ -49,6 +49,42 @@ FIELD_QUERY = Query(language, """
             name: (identifier) @field_name))
 """)
 
+TABLE_QUERY = Query(language, """
+    (class_declaration
+        (modifiers (annotation
+            name: (identifier) @annot (#eq? @annot "Table")
+            arguments: (annotation_argument_list
+                (element_value_pair
+                    key:   (identifier) @key   (#eq? @key "name")
+                    value: (string_literal)     @table_name)))))
+""")
+
+FIELD_WITH_ANNOTATIONS_QUERY = Query(language, """
+    (field_declaration
+        (modifiers (annotation
+            name: (identifier) @annotation_name))
+        type: (_) @field_type
+        declarator: (variable_declarator
+            name: (identifier) @field_name))
+""")
+
+COLUMN_NAME_QUERY = Query(language, """
+    (field_declaration
+        (modifiers (annotation
+            name: (identifier) @annot (#eq? @annot "Column")
+            arguments: (annotation_argument_list
+                (element_value_pair
+                    key:   (identifier) @key   (#eq? @key "name")
+                    value: (string_literal)     @col_name))))
+        declarator: (variable_declarator
+            name: (identifier) @field_name))
+""")
+
+NON_COLUMN_ANNOTATIONS = {
+    "OneToMany", "ManyToOne", "OneToOne", "ManyToMany",
+    "Transient", "Embedded", "EmbeddedId", "ElementCollection",
+}
+
 CONTEXT_QUERY = Query(language, """
     (method_invocation
         name: (identifier) @call_name)
@@ -66,10 +102,6 @@ class HibernateParser(BaseParser):
         if raw.startswith('"') and raw.endswith('"'):
             raw = raw[1:-1]
         return raw.replace('\\"', '"').replace('\\n', '\n')
-
-    @staticmethod
-    def find_injected_repos(content: str, known_repos: set[str]) -> set[str]:
-        return {repo for repo in known_repos if repo in content}
 
     @staticmethod
     def find_all_java_file(root_dir) -> list:
@@ -141,7 +173,7 @@ class HibernateParser(BaseParser):
                 }
         return filtered
 
-    def get_entity_columns(self, entity_path: str) -> list[dict] | None:
+    def get_entity_columns(self, entity_path: str) -> dict | None:
         if not entity_path:
             return None
         try:
@@ -153,40 +185,54 @@ class HibernateParser(BaseParser):
         tree = parser.parse(src)
         root = tree.root_node
 
+        table_name = None
+        for match in self.iter_matches(TABLE_QUERY, root):
+            nodes = match.get("table_name", [])
+            if nodes:
+                table_name = self.text(nodes[0], src).strip('"')
+                break
+
+        table_name_inferred = False
+        if table_name is None:
+            for match in self.iter_matches(ENTITY_QUERY, root):
+                for node in match.get("class_name", []):
+                    table_name = self.text(node, src)
+                    table_name_inferred = True
+                    break
+                if table_name:
+                    break
+
+        excluded_fields = set()
+        for match in self.iter_matches(FIELD_WITH_ANNOTATIONS_QUERY, root):
+            annot_nodes = match.get("annotation_name", [])
+            name_nodes = match.get("field_name", [])
+            if annot_nodes and name_nodes:
+                if self.text(annot_nodes[0], src) in NON_COLUMN_ANNOTATIONS:
+                    excluded_fields.add(self.text(name_nodes[0], src))
+
+        explicit_column_names: dict[str, str] = {}
+        for match in self.iter_matches(COLUMN_NAME_QUERY, root):
+            field_nodes = match.get("field_name", [])
+            col_nodes = match.get("col_name", [])
+            if field_nodes and col_nodes:
+                field = self.text(field_nodes[0], src)
+                column = self.text(col_nodes[0], src).strip('"')
+                explicit_column_names[field] = column
+
         columns = []
         for match in self.iter_matches(FIELD_QUERY, root):
             type_nodes = match.get("field_type", [])
             name_nodes = match.get("field_name", [])
             if type_nodes and name_nodes:
-                columns.append({
-                    "name": self.text(name_nodes[0], src),
-                    "type": self.text(type_nodes[0], src),
-                })
-        return columns
+                field_name = self.text(name_nodes[0], src)
+                if field_name not in excluded_fields:
+                    columns.append({
+                        "field_name": field_name,
+                        "column_name": explicit_column_names.get(field_name, field_name),
+                        "type": self.text(type_nodes[0], src),
+                    })
 
-    def _build_index(self, java_files: list[str]) -> dict:
-        result = {"entities": {}, "repositories": {}}
-        for path in java_files:
-            try:
-                with open(path, "rb") as f:
-                    src = f.read()
-            except (OSError, IOError) as exc:
-                print(f"[WARN] Skipping unreadable file {path}: {exc}")
-                continue
-
-            tree = parser.parse(src)
-            root = tree.root_node
-
-            result["entities"] |= self._extract_entities(root, src, path)
-
-            repo_name, entity_type, methods = self._extract_repository(root, src)
-            if repo_name:
-                result["repositories"][repo_name] = {
-                    "entity": entity_type,
-                    "methods": methods,
-                }
-
-        return result
+        return {"table_name": table_name, "table_name_inferred": table_name_inferred, "columns": columns}
 
     @staticmethod
     def _find_enclosing_scope(node):

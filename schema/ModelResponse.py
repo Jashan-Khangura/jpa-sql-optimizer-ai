@@ -1,14 +1,18 @@
 from pydantic import BaseModel
+from typing import Optional
+
+
+class QueryIssue(BaseModel):
+    issue_type: str
+    severity: str
+    description: str
+    suggestion: str
 
 
 class QueryAnalysis(BaseModel):
     repository: str
     method: str
-    original_query: str | None
-    query_issues: list[str]
-    optimized_query: str | None
+    original: Optional[str]
+    query_issues: list[QueryIssue]
+    optimized: Optional[str]
     recommended_indexes: list[str]
-
-
-class ModelResponse(BaseModel):
-    response: list[QueryAnalysis]

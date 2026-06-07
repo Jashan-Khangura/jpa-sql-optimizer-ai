@@ -9,7 +9,7 @@ class BaseParser(ABC):
         pass
 
     @abstractmethod
-    def get_entity_columns(self, entity_path: str) -> list[dict] | None:
+    def get_entity_columns(self, entity_path: str) -> dict | None:
         pass
 
     @staticmethod
